@@ -1,5 +1,5 @@
 {
-	"node": "n8n-nodes-base.Twenty",
+	"node": "n8n-nodes-twenty-dynamic.Twenty",
 	"nodeVersion": "1.0.3",
 	"codexVersion": "1.0",
 	"categories": [

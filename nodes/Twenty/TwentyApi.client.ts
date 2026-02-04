@@ -3,6 +3,20 @@ import { IExecuteFunctions, ILoadOptionsFunctions, NodeApiError } from 'n8n-work
 // Define a union type for the 'this' context, as the function can be called from both execute and loadOptions
 type TwentyApiContext = IExecuteFunctions | ILoadOptionsFunctions;
 
+function isHttpDebugEnabled(context: TwentyApiContext): boolean {
+	try {
+		const current = (context as ILoadOptionsFunctions).getCurrentNodeParameter('debugHttp');
+		return Boolean(current);
+	} catch {}
+
+	try {
+		const value = (context as IExecuteFunctions).getNodeParameter('debugHttp', 0);
+		return Boolean(value);
+	} catch {}
+
+	return false;
+}
+
 /**
  * Schema metadata interfaces
  */
@@ -72,6 +86,7 @@ export async function twentyApiRequest<T>(
 	variables?: object,
 ): Promise<T> {
 	const credentials = await this.getCredentials('twentyApi');
+	const debugHttp = isHttpDebugEnabled(this);
 
 	const options = {
 		method: 'POST' as const,
@@ -82,6 +97,7 @@ export async function twentyApiRequest<T>(
 			...(variables && { variables }),
 		},
 		json: true, // Automatically stringifies the body and parses the response
+		...(debugHttp ? { returnFullResponse: true } : {}),
 	};
 
 	try {
@@ -92,10 +108,21 @@ export async function twentyApiRequest<T>(
 			options,
 		);
 
+		const responseBody = debugHttp && response && typeof response === 'object' && 'body' in response
+			? (response as { body: any }).body
+			: response;
+
+		if (debugHttp) {
+			const statusCode = (response as { statusCode?: number }).statusCode;
+			this.logger.info(
+				`Twenty HTTP ${options.method} ${options.baseURL}${options.url} -> ${statusCode ?? 'unknown'}`,
+			);
+		}
+
 		// GraphQL errors are often in the response body
-		if (response.errors) {
+		if (responseBody.errors) {
 			// Transform GraphQL errors to user-friendly messages
-			const errorMessages = response.errors.map((error: any) => {
+			const errorMessages = responseBody.errors.map((error: any) => {
 				const code = error.extensions?.code;
 				const message = error.message;
 
@@ -116,8 +143,14 @@ export async function twentyApiRequest<T>(
 			throw new Error(errorMessages.join('; '));
 		}
 
-		return response.data;
+		return responseBody.data;
 	} catch (error) {
+		if (debugHttp) {
+			const statusCode = (error as { statusCode?: number }).statusCode;
+			this.logger.info(
+				`Twenty HTTP ${options.method} ${options.baseURL}${options.url} -> ${statusCode ?? 'error'}`,
+			);
+		}
 		// Handle network errors and other exceptions
 		if (error.message) {
 			// If it's already our formatted error, re-throw it
@@ -161,6 +194,7 @@ export async function twentyRestApiRequest<T>(
 	body?: object,
 ): Promise<T> {
 	const credentials = await this.getCredentials('twentyApi');
+	const debugHttp = isHttpDebugEnabled(this);
 
 	// Remove /graphql or /metadata from domain if present
 	let baseUrl = credentials.domain as string;
@@ -172,6 +206,7 @@ export async function twentyRestApiRequest<T>(
 		url: `/rest${path}`,
 		json: true,
 		...(body && { body }),
+		...(debugHttp ? { returnFullResponse: true } : {}),
 	};
 
 	try {
@@ -182,8 +217,25 @@ export async function twentyRestApiRequest<T>(
 			options,
 		);
 
-		return response;
+		const responseBody = debugHttp && response && typeof response === 'object' && 'body' in response
+			? (response as { body: any }).body
+			: response;
+
+		if (debugHttp) {
+			const statusCode = (response as { statusCode?: number }).statusCode;
+			this.logger.info(
+				`Twenty HTTP ${options.method} ${options.baseURL}${options.url} -> ${statusCode ?? 'unknown'}`,
+			);
+		}
+
+		return responseBody;
 	} catch (error) {
+		if (debugHttp) {
+			const statusCode = (error as { statusCode?: number }).statusCode;
+			this.logger.info(
+				`Twenty HTTP ${options.method} ${options.baseURL}${options.url} -> ${statusCode ?? 'error'}`,
+			);
+		}
 		// Handle REST API errors
 		if (error.statusCode) {
 			switch (error.statusCode) {

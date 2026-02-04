@@ -97,6 +97,13 @@ export class Twenty implements INodeType {
                 required: true,
                 description: 'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>. Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code-examples/expressions/">expression</a>.',
             },
+            {
+                displayName: 'Debug HTTP',
+                name: 'debugHttp',
+                type: 'boolean',
+                default: false,
+                description: 'Log request URL and status in the n8n logs (no tokens)',
+            },
             // Operation selection
             {
                 displayName: 'Operation',

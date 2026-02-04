@@ -880,6 +880,7 @@ export class Twenty implements INodeType {
                 type: 'number',
                 typeOptions: {
                     minValue: 1,
+                    maxValue: 60,
                 },
                 displayOptions: {
                     show: {
@@ -887,7 +888,19 @@ export class Twenty implements INodeType {
                     },
                 },
                 default: 50,
-                description: 'Max number of results to return',
+                description: 'Max number of results to return (page size, max 60)',
+            },
+            {
+                displayName: 'Return All',
+                name: 'returnAll',
+                type: 'boolean',
+                displayOptions: {
+                    show: {
+                        operation: ['findMany'],
+                    },
+                },
+                default: false,
+                description: 'Whether to return all results by paging through the full dataset',
             },
             {
                 displayName: 'Filter Logic',
@@ -1870,6 +1883,7 @@ export class Twenty implements INodeType {
                 } else if (operation === 'findMany') {
                     // Get limit from node parameters
                     const limit = this.getNodeParameter('limit', i) as number;
+                    const returnAll = this.getNodeParameter('returnAll', i, false) as boolean;
 
                     const filterLogic = this.getNodeParameter('filterLogic', i, 'AND') as 'AND' | 'OR';
                     const filtersParam = this.getNodeParameter('filters', i, {}) as {
@@ -1926,38 +1940,55 @@ export class Twenty implements INodeType {
 
                     // Use REST API for List/Search operation with filter query parameter
                     const pluralName = objectMetadata.namePlural;
-                    const queryParts: string[] = [];
-                    if (limit) {
-                        queryParts.push(`limit=${limit}`);
-                    }
-                    if (filterString) {
-                        queryParts.push(`filter=${encodeURIComponent(filterString)}`);
-                    }
-
-                    const restPath = `/${pluralName}${queryParts.length > 0 ? '?' + queryParts.join('&') : ''}`;
+                    const pageSize = Math.min(limit, 60);
+                    let startingAfter: string | undefined;
 
                     try {
-                        const response: any = await twentyRestApiRequest.call(
-                            this,
-                            'GET',
-                            restPath,
-                        );
+                        do {
+                            const queryParts: string[] = [];
+                            const effectiveLimit = returnAll ? pageSize : limit;
+                            if (effectiveLimit) {
+                                queryParts.push(`limit=${effectiveLimit}`);
+                            }
+                            if (filterString) {
+                                queryParts.push(`filter=${encodeURIComponent(filterString)}`);
+                            }
+                            if (returnAll && startingAfter) {
+                                queryParts.push(`starting_after=${encodeURIComponent(startingAfter)}`);
+                            }
 
-                        const records = response.data?.[pluralName];
-                        if (!records) {
-                            continue;
-                        }
+                            const restPath = `/${pluralName}${queryParts.length > 0 ? '?' + queryParts.join('&') : ''}`;
+                            const response: any = await twentyRestApiRequest.call(
+                                this,
+                                'GET',
+                                restPath,
+                            );
 
-                        const recordsArray = Array.isArray(records)
-                            ? records
-                            : records.edges?.map((edge: any) => edge.node) || [];
+                            const records = response.data?.[pluralName];
+                            if (!records) {
+                                break;
+                            }
 
-                        for (const record of recordsArray) {
-                            returnData.push({
-                                json: record,
-                                pairedItem: { item: i },
-                            });
-                        }
+                            const recordsArray = Array.isArray(records)
+                                ? records
+                                : records.edges?.map((edge: any) => edge.node) || [];
+
+                            for (const record of recordsArray) {
+                                returnData.push({
+                                    json: record,
+                                    pairedItem: { item: i },
+                                });
+                            }
+
+                            const pageInfo = response.data?.pageInfo || records?.pageInfo || response.pageInfo;
+                            const hasNextPage = pageInfo?.hasNextPage;
+                            const endCursor = pageInfo?.endCursor;
+                            if (returnAll && hasNextPage && endCursor) {
+                                startingAfter = endCursor;
+                            } else {
+                                break;
+                            }
+                        } while (returnAll);
                     } catch (error) {
                         if (error.message && error.message.includes('not found')) {
                             continue;

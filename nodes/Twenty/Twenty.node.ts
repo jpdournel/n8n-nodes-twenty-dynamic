@@ -889,6 +889,86 @@ export class Twenty implements INodeType {
                 default: 50,
                 description: 'Max number of results to return',
             },
+            {
+                displayName: 'Filter Logic',
+                name: 'filterLogic',
+                type: 'options',
+                displayOptions: {
+                    show: {
+                        operation: ['findMany'],
+                    },
+                },
+                options: [
+                    { name: 'Match All (AND)', value: 'AND' },
+                    { name: 'Match Any (OR)', value: 'OR' },
+                ],
+                default: 'AND',
+                description: 'How to combine multiple filters',
+            },
+            {
+                displayName: 'Filters',
+                name: 'filters',
+                type: 'fixedCollection',
+                typeOptions: {
+                    multipleValues: true,
+                },
+                displayOptions: {
+                    show: {
+                        operation: ['findMany'],
+                    },
+                },
+                placeholder: 'Add Filter',
+                default: {},
+                description: 'Filters to apply to the List/Search query',
+                options: [
+                    {
+                        name: 'filter',
+                        displayName: 'Filter',
+                        values: [
+                            {
+                                displayName: 'Field Name or ID',
+                                name: 'key',
+                                type: 'options',
+                                typeOptions: {
+                                    loadOptionsMethod: 'getFieldsForResource',
+                                },
+                                default: '',
+                                description: 'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+                            },
+                            {
+                                displayName: 'Operator',
+                                name: 'operator',
+                                type: 'options',
+                                default: 'eq',
+                                options: [
+                                    { name: 'Contains', value: 'contains' },
+                                    { name: 'Contains Any', value: 'containsAny' },
+                                    { name: 'Ends With', value: 'endsWith' },
+                                    { name: 'Equals', value: 'eq' },
+                                    { name: 'Greater Than', value: 'gt' },
+                                    { name: 'Greater Than or Equal', value: 'gte' },
+                                    { name: 'In', value: 'in' },
+                                    { name: 'Is', value: 'is' },
+                                    { name: 'Less Than', value: 'lt' },
+                                    { name: 'Less Than or Equal', value: 'lte' },
+                                    { name: 'Like', value: 'like' },
+                                    { name: 'Not Equal', value: 'not' },
+                                    { name: 'Not In', value: 'notIn' },
+                                    { name: 'Starts With', value: 'startsWith' },
+                                    { name: 'Ilike', value: 'ilike' },
+                                    { name: 'Not Equal (neq)', value: 'neq' },
+                                ],
+                            },
+                            {
+                                displayName: 'Value',
+                                name: 'value',
+                                type: 'string',
+                                default: '',
+                            },
+                        ],
+                    },
+                ],
+            },
         ],
     };
 
@@ -1791,19 +1871,71 @@ export class Twenty implements INodeType {
                     // Get limit from node parameters
                     const limit = this.getNodeParameter('limit', i) as number;
 
-                    // Use REST API for List/Search operation - returns all fields automatically
-                    // GraphQL still used for database/field selection, but REST for actual data retrieval
+                    const filterLogic = this.getNodeParameter('filterLogic', i, 'AND') as 'AND' | 'OR';
+                    const filtersParam = this.getNodeParameter('filters', i, {}) as {
+                        filter?: Array<{ key: string; operator: string; value: string }>;
+                    };
+
+                    const filters = (filtersParam.filter || []).filter((filter) => filter.key);
+
+                    const formatFilterValue = (rawValue: string, fieldType?: string, operator?: string): string => {
+                        const trimmed = rawValue.trim();
+                        if (operator === 'is' && trimmed.toLowerCase() === 'null') {
+                            return 'NULL';
+                        }
+                        if (fieldType === 'boolean') {
+                            return trimmed.toLowerCase() === 'true' ? 'true' : 'false';
+                        }
+                        if (fieldType === 'simple' && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+                            return trimmed;
+                        }
+                        return JSON.stringify(trimmed);
+                    };
+
+                    let filterString = '';
+                    if (filters.length > 0) {
+                        const conditions = filters.map((filter) => {
+                            const [fieldName, fieldType] = filter.key.includes('|')
+                                ? filter.key.split('|')
+                                : [filter.key, undefined];
+                            const operator = filter.operator === 'not' ? 'neq' : filter.operator;
+
+                            if (['in', 'notIn'].includes(operator)) {
+                                const rawValue = filter.value.trim();
+                                const listValue = rawValue.startsWith('[') && rawValue.endsWith(']')
+                                    ? rawValue
+                                    : `[${rawValue
+                                        .split(',')
+                                        .map((value) => value.trim())
+                                        .filter((value) => value !== '')
+                                        .map((value) => formatFilterValue(value, fieldType))
+                                        .join(',')}]`;
+                                return `${fieldName}[${operator}]:${listValue}`;
+                            }
+
+                            const formattedValue = formatFilterValue(filter.value, fieldType, operator);
+                            return `${fieldName}[${operator}]:${formattedValue}`;
+                        });
+
+                        if (filterLogic === 'OR' && conditions.length > 1) {
+                            filterString = `or(${conditions.join(',')})`;
+                        } else {
+                            filterString = conditions.join(',');
+                        }
+                    }
+
+                    // Use REST API for List/Search operation with filter query parameter
                     const pluralName = objectMetadata.namePlural;
-                    
-                    // Build query parameters for REST API
-                    // Note: REST API uses query parameters for pagination
                     const queryParts: string[] = [];
                     if (limit) {
                         queryParts.push(`limit=${limit}`);
                     }
-                    
+                    if (filterString) {
+                        queryParts.push(`filter=${encodeURIComponent(filterString)}`);
+                    }
+
                     const restPath = `/${pluralName}${queryParts.length > 0 ? '?' + queryParts.join('&') : ''}`;
-                    
+
                     try {
                         const response: any = await twentyRestApiRequest.call(
                             this,
@@ -1811,18 +1943,15 @@ export class Twenty implements INodeType {
                             restPath,
                         );
 
-                        // REST API returns data in format: { data: { [resourcePlural]: [...records] } }
                         const records = response.data?.[pluralName];
-                        
                         if (!records) {
-                            // No records found - return empty array
                             continue;
                         }
 
-                        // Handle both array response and paginated response
-                        const recordsArray = Array.isArray(records) ? records : records.edges?.map((edge: any) => edge.node) || [];
+                        const recordsArray = Array.isArray(records)
+                            ? records
+                            : records.edges?.map((edge: any) => edge.node) || [];
 
-                        // Transform each record to workflow record
                         for (const record of recordsArray) {
                             returnData.push({
                                 json: record,
@@ -1830,9 +1959,7 @@ export class Twenty implements INodeType {
                             });
                         }
                     } catch (error) {
-                        // If REST API fails, provide helpful error message
-                        if (error.message.includes('not found')) {
-                            // Empty result - continue
+                        if (error.message && error.message.includes('not found')) {
                             continue;
                         }
                         throw error;

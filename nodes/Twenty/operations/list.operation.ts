@@ -18,6 +18,7 @@ export async function buildListQuery(
 	objectNameSingular: string,
 	limit: number,
 	objectMetadata: any,
+	where?: Record<string, any> | null,
 ): Promise<{ query: string; variables: Record<string, any> }> {
 	// Capitalize the object name for the GraphQL type (e.g., 'company' -> 'Company')
 	const capitalizedObjectName = objectNameSingular.charAt(0).toUpperCase() + objectNameSingular.slice(1);
@@ -27,12 +28,13 @@ export async function buildListQuery(
 
 	// Use namePlural for the query name (e.g., 'companies', 'people')
 	const pluralName = objectMetadata.namePlural;
+	const filterType = `${capitalizedObjectName}Filters`;
 
 	// Construct query with edges/node structure
 	// Note: Use 'first' directly, not 'paging: { first: ... }'
 	const query = `
-		query List${objectMetadata.labelPlural.replace(/\s+/g, '')}($limit: Int!) {
-			${pluralName}(first: $limit) {
+		query List${objectMetadata.labelPlural.replace(/\s+/g, '')}($limit: Int!, $where: ${filterType}) {
+			${pluralName}(first: $limit, where: $where) {
 				edges {
 					node {
 						${fieldSelections}
@@ -45,6 +47,7 @@ export async function buildListQuery(
 	// Variables
 	const variables = {
 		limit,
+		where: where ?? null,
 	};
 
 	return { query, variables };

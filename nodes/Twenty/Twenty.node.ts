@@ -22,6 +22,7 @@ import {
 } from './TwentyApi.client';
 import { transformFieldsData, IFieldData } from './FieldTransformation';
 import { 
+    buildListQuery,
     executeUpsert,
     executeCreateMany,
     executeGetMany,
@@ -888,6 +889,81 @@ export class Twenty implements INodeType {
                 },
                 default: 50,
                 description: 'Max number of results to return',
+            },
+            {
+                displayName: 'Filter Logic',
+                name: 'filterLogic',
+                type: 'options',
+                displayOptions: {
+                    show: {
+                        operation: ['findMany'],
+                    },
+                },
+                options: [
+                    { name: 'Match All (AND)', value: 'AND' },
+                    { name: 'Match Any (OR)', value: 'OR' },
+                ],
+                default: 'AND',
+                description: 'How to combine multiple filters',
+            },
+            {
+                displayName: 'Filters',
+                name: 'filters',
+                type: 'fixedCollection',
+                typeOptions: {
+                    multipleValues: true,
+                },
+                displayOptions: {
+                    show: {
+                        operation: ['findMany'],
+                    },
+                },
+                placeholder: 'Add Filter',
+                default: {},
+                description: 'Filters to apply to the List/Search query',
+                options: [
+                    {
+                        name: 'filter',
+                        displayName: 'Filter',
+                        values: [
+                            {
+                                displayName: 'Field Name or ID',
+                                name: 'key',
+                                type: 'options',
+                                typeOptions: {
+                                    loadOptionsMethod: 'getFieldsForResource',
+                                },
+                                default: '',
+                                description: 'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>.',
+                            },
+                            {
+                                displayName: 'Operator',
+                                name: 'operator',
+                                type: 'options',
+                                default: 'eq',
+                                options: [
+                                    { name: 'Contains', value: 'contains' },
+                                    { name: 'Ends With', value: 'endsWith' },
+                                    { name: 'Equals', value: 'eq' },
+                                    { name: 'Greater Than', value: 'gt' },
+                                    { name: 'Greater Than or Equal', value: 'gte' },
+                                    { name: 'In', value: 'in' },
+                                    { name: 'Less Than', value: 'lt' },
+                                    { name: 'Less Than or Equal', value: 'lte' },
+                                    { name: 'Not Equal', value: 'not' },
+                                    { name: 'Not In', value: 'notIn' },
+                                    { name: 'Starts With', value: 'startsWith' },
+                                ],
+                            },
+                            {
+                                displayName: 'Value',
+                                name: 'value',
+                                type: 'string',
+                                default: '',
+                            },
+                        ],
+                    },
+                ],
             },
         ],
     };
@@ -1791,38 +1867,71 @@ export class Twenty implements INodeType {
                     // Get limit from node parameters
                     const limit = this.getNodeParameter('limit', i) as number;
 
-                    // Use REST API for List/Search operation - returns all fields automatically
-                    // GraphQL still used for database/field selection, but REST for actual data retrieval
-                    const pluralName = objectMetadata.namePlural;
-                    
-                    // Build query parameters for REST API
-                    // Note: REST API uses query parameters for pagination
-                    const queryParts: string[] = [];
-                    if (limit) {
-                        queryParts.push(`limit=${limit}`);
+                    const filterLogic = this.getNodeParameter('filterLogic', i, 'AND') as 'AND' | 'OR';
+                    const filtersParam = this.getNodeParameter('filters', i, {}) as {
+                        filter?: Array<{ key: string; operator: string; value: string }>;
+                    };
+
+                    const normalizeFilterValue = (rawValue: string, fieldType?: string): string | number | boolean => {
+                        if (fieldType === 'boolean') {
+                            return rawValue.toLowerCase() === 'true';
+                        }
+                        if (fieldType === 'simple') {
+                            const trimmed = rawValue.trim();
+                            if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+                                return Number(trimmed);
+                            }
+                        }
+                        return rawValue;
+                    };
+
+                    let where: Record<string, any> | null = null;
+                    const filters = (filtersParam.filter || []).filter((filter) => filter.key);
+                    if (filters.length > 0) {
+                        const conditions = filters.map((filter) => {
+                            const [fieldName, fieldType] = filter.key.includes('|')
+                                ? filter.key.split('|')
+                                : [filter.key, undefined];
+
+                            if (['in', 'notIn'].includes(filter.operator)) {
+                                const values = filter.value
+                                    .split(',')
+                                    .map((value) => value.trim())
+                                    .filter((value) => value !== '')
+                                    .map((value) => normalizeFilterValue(value, fieldType));
+                                return { [fieldName]: { [filter.operator]: values } };
+                            }
+
+                            return {
+                                [fieldName]: {
+                                    [filter.operator]: normalizeFilterValue(filter.value, fieldType),
+                                },
+                            };
+                        });
+
+                        where = { [filterLogic]: conditions };
                     }
-                    
-                    const restPath = `/${pluralName}${queryParts.length > 0 ? '?' + queryParts.join('&') : ''}`;
-                    
+
+                    const { query, variables } = await buildListQuery(
+                        this,
+                        resource,
+                        limit,
+                        objectMetadata,
+                        where,
+                    );
+
                     try {
-                        const response: any = await twentyRestApiRequest.call(
+                        const response: any = await twentyApiRequest.call(
                             this,
-                            'GET',
-                            restPath,
+                            'graphql',
+                            query,
+                            variables,
                         );
 
-                        // REST API returns data in format: { data: { [resourcePlural]: [...records] } }
-                        const records = response.data?.[pluralName];
-                        
-                        if (!records) {
-                            // No records found - return empty array
-                            continue;
-                        }
+                        const pluralName = objectMetadata.namePlural;
+                        const edges = response[pluralName]?.edges || [];
+                        const recordsArray = edges.map((edge: any) => edge.node);
 
-                        // Handle both array response and paginated response
-                        const recordsArray = Array.isArray(records) ? records : records.edges?.map((edge: any) => edge.node) || [];
-
-                        // Transform each record to workflow record
                         for (const record of recordsArray) {
                             returnData.push({
                                 json: record,
@@ -1830,9 +1939,7 @@ export class Twenty implements INodeType {
                             });
                         }
                     } catch (error) {
-                        // If REST API fails, provide helpful error message
-                        if (error.message.includes('not found')) {
-                            // Empty result - continue
+                        if (error.message && error.message.includes('not found')) {
                             continue;
                         }
                         throw error;

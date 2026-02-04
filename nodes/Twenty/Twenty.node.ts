@@ -22,7 +22,6 @@ import {
 } from './TwentyApi.client';
 import { transformFieldsData, IFieldData } from './FieldTransformation';
 import { 
-    buildListQuery,
     executeUpsert,
     executeCreateMany,
     executeGetMany,
@@ -943,16 +942,21 @@ export class Twenty implements INodeType {
                                 default: 'eq',
                                 options: [
                                     { name: 'Contains', value: 'contains' },
+                                    { name: 'Contains Any', value: 'containsAny' },
                                     { name: 'Ends With', value: 'endsWith' },
                                     { name: 'Equals', value: 'eq' },
                                     { name: 'Greater Than', value: 'gt' },
                                     { name: 'Greater Than or Equal', value: 'gte' },
                                     { name: 'In', value: 'in' },
+                                    { name: 'Is', value: 'is' },
                                     { name: 'Less Than', value: 'lt' },
                                     { name: 'Less Than or Equal', value: 'lte' },
+                                    { name: 'Like', value: 'like' },
                                     { name: 'Not Equal', value: 'not' },
                                     { name: 'Not In', value: 'notIn' },
                                     { name: 'Starts With', value: 'startsWith' },
+                                    { name: 'Ilike', value: 'ilike' },
+                                    { name: 'Not Equal (neq)', value: 'neq' },
                                 ],
                             },
                             {
@@ -1872,65 +1876,81 @@ export class Twenty implements INodeType {
                         filter?: Array<{ key: string; operator: string; value: string }>;
                     };
 
-                    const normalizeFilterValue = (rawValue: string, fieldType?: string): string | number | boolean => {
+                    const filters = (filtersParam.filter || []).filter((filter) => filter.key);
+
+                    const formatFilterValue = (rawValue: string, fieldType?: string, operator?: string): string => {
+                        const trimmed = rawValue.trim();
+                        if (operator === 'is' && trimmed.toLowerCase() === 'null') {
+                            return 'NULL';
+                        }
                         if (fieldType === 'boolean') {
-                            return rawValue.toLowerCase() === 'true';
+                            return trimmed.toLowerCase() === 'true' ? 'true' : 'false';
                         }
-                        if (fieldType === 'simple') {
-                            const trimmed = rawValue.trim();
-                            if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-                                return Number(trimmed);
-                            }
+                        if (fieldType === 'simple' && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+                            return trimmed;
                         }
-                        return rawValue;
+                        return JSON.stringify(trimmed);
                     };
 
-                    let where: Record<string, any> | null = null;
-                    const filters = (filtersParam.filter || []).filter((filter) => filter.key);
+                    let filterString = '';
                     if (filters.length > 0) {
                         const conditions = filters.map((filter) => {
                             const [fieldName, fieldType] = filter.key.includes('|')
                                 ? filter.key.split('|')
                                 : [filter.key, undefined];
+                            const operator = filter.operator === 'not' ? 'neq' : filter.operator;
 
-                            if (['in', 'notIn'].includes(filter.operator)) {
-                                const values = filter.value
-                                    .split(',')
-                                    .map((value) => value.trim())
-                                    .filter((value) => value !== '')
-                                    .map((value) => normalizeFilterValue(value, fieldType));
-                                return { [fieldName]: { [filter.operator]: values } };
+                            if (['in', 'notIn'].includes(operator)) {
+                                const rawValue = filter.value.trim();
+                                const listValue = rawValue.startsWith('[') && rawValue.endsWith(']')
+                                    ? rawValue
+                                    : `[${rawValue
+                                        .split(',')
+                                        .map((value) => value.trim())
+                                        .filter((value) => value !== '')
+                                        .map((value) => formatFilterValue(value, fieldType))
+                                        .join(',')}]`;
+                                return `${fieldName}[${operator}]:${listValue}`;
                             }
 
-                            return {
-                                [fieldName]: {
-                                    [filter.operator]: normalizeFilterValue(filter.value, fieldType),
-                                },
-                            };
+                            const formattedValue = formatFilterValue(filter.value, fieldType, operator);
+                            return `${fieldName}[${operator}]:${formattedValue}`;
                         });
 
-                        where = { [filterLogic]: conditions };
+                        if (filterLogic === 'OR' && conditions.length > 1) {
+                            filterString = `or(${conditions.join(',')})`;
+                        } else {
+                            filterString = conditions.join(',');
+                        }
                     }
 
-                    const { query, variables } = await buildListQuery(
-                        this,
-                        resource,
-                        limit,
-                        objectMetadata,
-                        where,
-                    );
+                    // Use REST API for List/Search operation with filter query parameter
+                    const pluralName = objectMetadata.namePlural;
+                    const queryParts: string[] = [];
+                    if (limit) {
+                        queryParts.push(`limit=${limit}`);
+                    }
+                    if (filterString) {
+                        queryParts.push(`filter=${encodeURIComponent(filterString)}`);
+                    }
+
+                    const restPath = `/${pluralName}${queryParts.length > 0 ? '?' + queryParts.join('&') : ''}`;
 
                     try {
-                        const response: any = await twentyApiRequest.call(
+                        const response: any = await twentyRestApiRequest.call(
                             this,
-                            'graphql',
-                            query,
-                            variables,
+                            'GET',
+                            restPath,
                         );
 
-                        const pluralName = objectMetadata.namePlural;
-                        const edges = response[pluralName]?.edges || [];
-                        const recordsArray = edges.map((edge: any) => edge.node);
+                        const records = response.data?.[pluralName];
+                        if (!records) {
+                            continue;
+                        }
+
+                        const recordsArray = Array.isArray(records)
+                            ? records
+                            : records.edges?.map((edge: any) => edge.node) || [];
 
                         for (const record of recordsArray) {
                             returnData.push({
